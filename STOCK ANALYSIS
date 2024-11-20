@@ -1,0 +1,125 @@
+# Import libraries
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import os
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+import plotly.graph_objects as go
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+# Path to LSTM model file
+MODEL_PATH = "stock_price_model.h5"  # Replace with your model's path
+model = None
+
+# Check if the model file exists
+if os.path.exists(MODEL_PATH):
+    model = load_model(MODEL_PATH)
+else:
+    st.warning("LSTM model file (stock_price_model.h5) not found. Predictions will be skipped.")
+
+# Initialize Sentiment Analyzer
+analyzer = SentimentIntensityAnalyzer()
+
+# Streamlit app
+st.title("📈 Stock Price Prediction with LSTM")
+st.write("Predict future stock prices using a deep learning model (LSTM) and analyze news sentiment.")
+
+# User input
+symbols = st.text_area("Enter Stock Symbols (comma-separated):", "AAPL, MSFT")
+symbol_list = [s.strip() for s in symbols.split(",")]
+start_date = st.date_input("Start Date", value=pd.to_datetime("2022-01-01"))
+end_date = st.date_input("End Date", value=pd.to_datetime("2023-01-01"))
+lookback = st.slider("Lookback Period (days):", min_value=10, max_value=120, value=60)
+
+# Function to fetch and preprocess stock data
+def get_stock_data(symbol, start_date, end_date):
+    stock_data = yf.download(symbol, start=start_date, end=end_date)
+    if stock_data.empty:
+        st.warning(f"No data found for symbol: {symbol}")
+        return None
+    stock_data['Date'] = stock_data.index
+    stock_data.reset_index(drop=True, inplace=True)
+    return stock_data
+
+# Function to predict stock prices
+def predict_stock_prices(stock_data, lookback):
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_data = scaler.fit_transform(stock_data[['Close']])
+
+    # Prepare input data for LSTM
+    X_test = []
+    for i in range(lookback, len(scaled_data)):
+        X_test.append(scaled_data[i-lookback:i, 0])
+    X_test = np.array(X_test)
+    X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+
+    # Make predictions if model exists
+    predictions = []
+    if model:
+        predictions = model.predict(X_test)
+        predictions = scaler.inverse_transform(predictions)
+    return predictions
+
+# Function to analyze news sentiment
+def analyze_sentiment(symbol):
+    stock = yf.Ticker(symbol)
+    news = stock.news
+    sentiment_scores = []
+    for article in news:
+        headline = article['title']
+        sentiment_score = analyzer.polarity_scores(headline)
+        sentiment_scores.append({
+            "headline": headline,
+            "compound": sentiment_score['compound'],
+            "sentiment": "Positive" if sentiment_score['compound'] > 0.05 else ("Negative" if sentiment_score['compound'] < -0.05 else "Neutral")
+        })
+    return sentiment_scores
+
+# Multi-stock prediction
+for symbol in symbol_list:
+    st.subheader(f"Prediction Results for {symbol}")
+    
+    # Fetch stock data
+    stock_data = get_stock_data(symbol, start_date, end_date)
+    if stock_data is None:
+        continue
+
+    if model:
+        # Predict stock prices
+        predictions = predict_stock_prices(stock_data, lookback)
+        if predictions:
+            # Append predictions to stock data
+            stock_data['Predicted Close'] = np.nan
+            stock_data.loc[lookback:, 'Predicted Close'] = np.array(predictions).flatten()
+
+            # Plot results
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=stock_data['Date'], y=stock_data['Close'], mode='lines', name='Actual Prices'))
+            fig.add_trace(go.Scatter(x=stock_data['Date'][lookback:], y=stock_data['Predicted Close'][lookback:], mode='lines', name='Predicted Prices', line=dict(color='orange')))
+            fig.update_layout(title=f"{symbol} Stock Price Prediction", xaxis_title="Date", yaxis_title="Close Price", template="plotly_dark")
+            st.plotly_chart(fig)
+
+            # Add download button for predictions
+            csv_data = stock_data.to_csv(index=False)
+            st.download_button(label="📥 Download Predictions as CSV", data=csv_data, file_name=f"{symbol}_predictions.csv", mime="text/csv")
+        else:
+            st.write("Predictions could not be generated.")
+    else:
+        st.write("LSTM model not available for predictions.")
+
+    # Sentiment Analysis for Stock News
+    st.subheader(f"Sentiment Analysis for {symbol}")
+    sentiment_scores = analyze_sentiment(symbol)
+    if sentiment_scores:
+        for score in sentiment_scores[:5]:  # Show first 5 headlines
+            st.write(f"**Headline:** {score['headline']}")
+            st.write(f"**Sentiment:** {score['sentiment']}")
+            st.write(f"**Sentiment Score:** {score['compound']}")
+            st.write("---")
+    else:
+        st.write("No news found.")
+
+# Footer
+st.markdown("Created by **Your Name**. Powered by Streamlit and TensorFlow.")
